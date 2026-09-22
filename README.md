@@ -4,15 +4,14 @@ FPGA project for the Digilent Zybo Z7 (Zynq-7000): a hand-written SPI
 master in Verilog reading a MAX31723 digital thermometer, exposed as an
 AXI-Lite IP and read out over the Zynq PS via C.
 
-## Files
-
 | File | Description |
-|------|--------------|
-| `tempsensor.v` | SPI master + MAX31723 driver. Writes the config register (enables continuous conversion), then periodically reads the temperature register (address + LSB + MSB burst). |
-| `myip_spi_ela_v1_0.v` | AXI wrapper top-level (pass-through to S00_AXI). |
-| `myip_spi_ela_v1_0_S00_AXI.v` | AXI-Lite register interface driving `tempsensor.v`. |
-| `zybo_spi.xdc` | Pin constraints (SPI lines, clock, reset). |
-| `main.c` | Vitis/SDK application: polls the status register and prints the temperature over UART. |
+|------|-------------|
+| `tempsensor.v` | SPI master + MAX31723 driver |
+| `myip_spi_ela_v1_0.v` | AXI wrapper top-level |
+| `myip_spi_ela_v1_0_S00_AXI.v` | AXI-Lite register interface |
+| `zybo_spi.xdc` | Pin constraints |
+| `main.c` | Vitis/SDK app: reads temp, prints over UART |
+| `tb_tempsensor.v` | Testbench + behavioral MAX31723 model |
 
 ## Protocol
 
@@ -22,6 +21,17 @@ MAX31723 communicates over SPI, Mode 1 (CPOL=0, CPHA=1), MSB-first.
   ships in shutdown mode by default).
 - Temperature register (`0x01` read, burst LSB then MSB): 16-bit two's
   complement, 9-bit resolution by default.
+```mermaid
+stateDiagram-v2
+    [*] --> CFG_START
+    CFG_START --> CE_SETUP: load config write bytes (0x80, 0x00), spi_ce = 1
+    CE_SETUP --> SHIFT: tCC setup time elapsed (~400ns)
+    SHIFT --> SHIFT: shift byte out/in on sclk edges
+    SHIFT --> CE_HOLD: all bytes transferred
+    CE_HOLD --> WAIT_READ: tCCH hold time elapsed (~100ns), spi_ce = 0<br/>if read: latch temp_data, pulse temp_vld
+    WAIT_READ --> READ_START: READ_INTERVAL_MS elapsed
+    READ_START --> CE_SETUP: load read address (0x01), spi_ce = 1
+```
 
 ## AXI register map (offset from IP base address)
 
@@ -48,7 +58,20 @@ over UART every ~100ms.
    run on hardware.
 
 ## Hardware notes
+## Results
+
+Verified on hardware (Zybo Z7-10): the module correctly initializes the
+MAX31723 (config write, SD=0), then reads back the temperature register
+every ~1s and prints the converted value over UART via `main.c`. Confirmed
+the reading responds correctly to real temperature changes — touching the
+sensor with a warm or cold source produced a corresponding rise or drop in
+the reported value.
+
+Simulation waveform (below) confirm the same SPI timing and read sequence
+in isolation, without requiring hardware:
+<img width="1130" height="354" alt="Screenshot 2026-09-22 at 16 44 36" src="https://github.com/user-attachments/assets/ede4cead-60d5-4586-98b7-139e122ef246" />
 
 - MAX31723 CE must be held high for the full transfer, with tCC (~400ns)
   setup before SCLK starts and tCCH (~100ns) hold after the last SCLK edge.
 - SCLK kept at 4MHz (datasheet max 5MHz) for timing margin.
+
