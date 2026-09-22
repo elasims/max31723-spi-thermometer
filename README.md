@@ -1,46 +1,54 @@
-# temperature-sensor-w-spi
+# max31723-spi-thermometer
 
-FPGA projects for the Digilent Zybo Z7 (Zynq-7000), covering two hand-written serial interfaces in Verilog:
+FPGA project for the Digilent Zybo Z7 (Zynq-7000): a hand-written SPI
+master in Verilog reading a MAX31723 digital thermometer, exposed as an
+AXI-Lite IP and read out over the Zynq PS via C.
 
-- **SPI** — MAX31723 digital thermometer
-- **I2C** — MAX7304 8-bit I2C GPIO expander, AXI-Lite wrapped and controlled from C over the Zynq PS
+## Files
 
-## Repository structure
+| File | Description |
+|------|--------------|
+| `tempsensor.v` | SPI master + MAX31723 driver. Writes the config register (enables continuous conversion), then periodically reads the temperature register (address + LSB + MSB burst). |
+| `myip_spi_ela_v1_0.v` | AXI wrapper top-level (pass-through to S00_AXI). |
+| `myip_spi_ela_v1_0_S00_AXI.v` | AXI-Lite register interface driving `tempsensor.v`. |
+| `zybo_spi.xdc` | Pin constraints (SPI lines, clock, reset). |
+| `main.c` | Vitis/SDK application: polls the status register and prints the temperature over UART. |
 
-tempsensor.v -- SPI master + MAX31723 driver (config write, periodic temp read)
-top.v -- I2C bit-bang engine (START/WRITE/READ/STOP core, AXI-controlled)
-myip_iic_ela_v1_0.v -- AXI wrapper top-level (pass-through to S00_AXI)
-myip_iic_ela_v1_0_S00_AXI.v -- AXI-Lite register interface driving top.v
-zybo_i2c.xdc -- pin constraints (SDA/SCL, clock, reset)
-main.c -- Vitis/SDK application: drives the I2C engine via AXI registers
+## Protocol
 
+MAX31723 communicates over SPI, Mode 1 (CPOL=0, CPHA=1), MSB-first.
 
-## I2C design
+- Config register (`0x80` write): SD=0 enables continuous conversion (device
+  ships in shutdown mode by default).
+- Temperature register (`0x01` read, burst LSB then MSB): 16-bit two's
+  complement, 9-bit resolution by default.
 
-`top.v` implements a generic I2C master core (bit-banged SDA/SCL, open-drain, 4-phase bit timing) exposed as four primitive operations: `START`, `WRITE`, `READ`, `STOP`. All sequencing (device enable, port direction configuration, register reads/writes) is done in software — the core has no built-in transaction logic.
-
-### AXI register map (offset from IP base address)
+## AXI register map (offset from IP base address)
 
 | Offset | Name  | Access | Description |
 |--------|-------|--------|-------------|
-| 0x00   | CTRL  | W      | `[1:0]`=op_type, `[9:2]`=wr_data, `[10]`=send_nack. Writing triggers the operation. |
-| 0x04   | DONE  | R      | 1 when the last triggered operation has completed. |
-| 0x08   | RDATA | R      | Last byte read from the bus. |
+| 0x00   | TEMP_DATA | R  | Last read 16-bit temperature value ({MSB, LSB}). |
+| 0x04   | STATUS    | R  | Bit 0: new data ready (cleared on read). |
 
-`op_type`: `0`=START, `1`=WRITE, `2`=READ, `3`=STOP.
+## C usage
 
-### C usage
-
-`main.c` initializes the MAX7304 (enable GPIOs, set all 8 ports as inputs), then repeatedly prompts over UART which port to check and reports which ports currently read high.
+`main.c` polls the STATUS register; when new data is ready, it reads
+TEMP_DATA, converts it (`signed_raw / 256.0`), and prints the temperature
+over UART every ~100ms.
 
 ## Build
 
-1. Open the Vivado project, instantiate the packaged IP (`myip_iic_ela`) in a Block Design alongside the Zynq7 Processing System.
-2. Run Block/Connection Automation, validate the design, generate the HDL wrapper.
-3. Apply `zybo_i2c.xdc`, generate bitstream, export hardware (with bitstream).
-4. In Vitis/SDK, create a standalone application, add `main.c`, build and run on hardware.
+1. Package `tempsensor.v` inside the AXI-Lite wrapper (`myip_spi_ela`) and
+   add it to the IP repository.
+2. In a Block Design, instantiate the IP alongside the Zynq7 Processing
+   System, run Block/Connection Automation, validate, create the HDL
+   wrapper.
+3. Apply `zybo_spi.xdc`, generate bitstream, export hardware with bitstream.
+4. In Vitis/SDK, create a standalone application, add `main.c`, build and
+   run on hardware.
 
 ## Hardware notes
 
-- MAX7304 requires external pull-ups on SDA/SCL (open-drain bus).
-- I2C address assumed `AD0 = GND` → 7-bit address `0x1C` (write `0x38`, read `0x39`).
+- MAX31723 CE must be held high for the full transfer, with tCC (~400ns)
+  setup before SCLK starts and tCCH (~100ns) hold after the last SCLK edge.
+- SCLK kept at 4MHz (datasheet max 5MHz) for timing margin.
